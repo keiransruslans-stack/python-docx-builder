@@ -1,13 +1,26 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import List, Literal, Optional
 from docx import Document
-from fastapi.responses import FileResponse
 import uuid
 import os
 import uvicorn
 
 app = FastAPI()
+
+# ---------------------------------------------------------------------------
+# Optional API key auth — set API_KEY env var to enable, leave blank to skip
+# ---------------------------------------------------------------------------
+_API_KEY = os.environ.get("API_KEY", "")
+
+
+@app.middleware("http")
+async def api_key_middleware(request: Request, call_next):
+    if _API_KEY and request.url.path != "/health":
+        if request.headers.get("X-API-Key", "") != _API_KEY:
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing X-API-Key header"})
+    return await call_next(request)
 
 TEMPLATE_DIR = "templates"
 
@@ -52,7 +65,7 @@ def health():
 
 
 @app.post("/")
-def generate_docx(req: RequestBody):
+def generate_docx(req: RequestBody, background_tasks: BackgroundTasks):
     # --- Validate template file exists ---
     template_path = os.path.join(TEMPLATE_DIR, req.template)
     if not os.path.exists(template_path):
@@ -127,6 +140,8 @@ def generate_docx(req: RequestBody):
     out_path = f"/tmp/output_{uuid.uuid4()}.docx"
     doc.save(out_path)
 
+    background_tasks.add_task(os.remove, out_path)
+
     return FileResponse(
         out_path,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -135,5 +150,5 @@ def generate_docx(req: RequestBody):
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)

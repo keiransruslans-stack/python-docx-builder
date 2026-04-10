@@ -1,0 +1,231 @@
+{
+  "name": "Raw Text to Structured DOCX Document Generator with LLM Classification",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "raw-text-to-docx",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "6ef10a97-2155-4238-84d3-622711c5b82a",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "webhookId": "d8294137-2693-4022-bc53-e1e7f7cc5528"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the raw text from the webhook body\nconst rawText = $input.first().json.body.rawText || '';\n\n// Remove HTML tags\nlet cleanedText = rawText.replace(/<[^>]*>/g, '');\n\n// Decode HTML entities\ncleanedText = cleanedText\n  .replace(/&nbsp;/g, ' ')\n  .replace(/&amp;/g, '&')\n  .replace(/&lt;/g, '<')\n  .replace(/&gt;/g, '>')\n  .replace(/&quot;/g, '\"')\n  .replace(/&#39;/g, \"'\");\n\n// Normalize whitespace (replace tabs and multiple spaces with a single space)\ncleanedText = cleanedText.replace(/[\\t ]+/g, ' ');\n\n// Collapse multiple line breaks into max 2\ncleanedText = cleanedText.replace(/\\n{3,}/g, '\\n\\n');\n\n// Trim each line\ncleanedText = cleanedText.split('\\n').map(line => line.trim()).join('\\n');\n\n// Trim overall\ncleanedText = cleanedText.trim();\n\n// Return the cleaned text\nreturn [{\n  json: {\n    raw_text: cleanedText\n  }\n}];"
+      },
+      "id": "67c5bbe5-c497-4579-8b22-c07753797788",
+      "name": "Clean Raw Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [224, 0]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "o4-mini",
+          "mode": "list",
+          "cachedResultName": "O4-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are \"GBM Document Structurer,\" a deterministic document segmentation engine. \nYour goals:\n1. Transform the input into a structured hierarchy.\n2. Detect headings, sub-headings, bullet lists, paragraphs, and special blocks.\n3. Normalize spacing and convert into a consistent semantic structure.\n4. Output ONLY valid JSON following the schema below.\n\nRules:\n- Never hallucinate.\n- Never summarize.\n- Never remove important text.\n- Do NOT fix content or grammar.\n- Identify heading levels even if the user formatting is inconsistent.\n- Preserve lists and ordering.\n- Output VALID JSON only. No markdown code fences. No prose.\n\nSchema:\n{\n  \"title\": \"<string or null>\",\n  \"document_type\": \"<string>\",\n  \"sections\": [\n    {\n      \"heading\": \"<string>\",\n      \"level\": <1|2|3>,\n      \"content_blocks\": [\n        {\n          \"type\": \"paragraph\" | \"bullet_list\" | \"note\" | \"raw\",\n          \"text\": \"<string>\"\n        }\n      ]\n    }\n  ]\n}"
+            },
+            {
+              "content": "=Here is the cleaned text:\n\n{{ $item(0).$node[\"Clean Raw Text\"].json[\"raw_text\"] }}\n\nHere is the metadata:\n\n{{ $item(0).$node[\"Document Clarifier\"].json[\"output\"][0][\"content\"][0][\"text\"] }}\n\nHere is the classified document type:\n\n{{ JSON.parse($item(0).$node[\"Document Type Classifier\"].json[\"output\"][0][\"content\"][0][\"text\"]).document_type }}\n\nReturn ONLY valid JSON with the schema defined above.\nNo markdown code fences. No prose. No explanation."
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "a78d56c5-4113-49fa-b9c2-4ce1325da28c",
+      "name": "Structure Document",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2,
+      "position": [1072, 0],
+      "credentials": {
+        "openAiApi": {
+          "id": "TFKcdbI8T7unt4DU",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---------------------------------------------\n// Map structured document → DOCX style mapping\n// FIX: Strip markdown code fences before JSON.parse()\n// ---------------------------------------------\n\n// Word style mapping for block types\nconst blockStyleMap = {\n  \"paragraph\": \"GBM Normal1\",\n  \"bullet_list\": \"GBM Dash Bullet\",\n  \"note\": \"GBM Note\",\n  \"raw\": \"GBM Raw\"\n};\n\n// Heading level → Word style\nconst headingStyleMap = {\n  1: \"Heading 1\",\n  2: \"Heading 2\",\n  3: \"Heading 3\"\n};\n\n// Load structured document (the LLM returned JSON as a string)\nconst raw = $input.first().json;\nlet rawStr = raw.text || raw.output?.[0]?.content?.[0]?.text || '';\n\n// Strip markdown code fences that LLMs sometimes add (```json ... ``` or ``` ... ```)\nrawStr = rawStr.replace(/^```(?:json)?\\s*/i, '').replace(/\\s*```$/, '').trim();\n\nlet doc;\ntry {\n  doc = JSON.parse(rawStr);\n} catch (e) {\n  throw new Error('Structure Document returned invalid JSON. Raw output: ' + rawStr.slice(0, 300));\n}\n\n// Transform sections + blocks into a flat render list\nconst styled = [];\n\ndoc.sections.forEach(section => {\n  // Push the heading itself as a block\n  styled.push({\n    type: \"heading\",\n    text: section.heading,\n    level: section.level,\n    word_style: headingStyleMap[section.level] || \"Heading 1\"\n  });\n\n  // Process all content blocks within the section\n  section.content_blocks.forEach(block => {\n    styled.push({\n      type: block.type,\n      text: block.text,\n      word_style: blockStyleMap[block.type] || \"GBM Normal1\"\n    });\n  });\n});\n\n// Output formatted blocks + metadata\nreturn [{\n  json: {\n    title: doc.title,\n    document_type: doc.document_type,\n    styled_blocks: styled\n  }\n}];"
+      },
+      "id": "6265e2d4-4371-4fca-972d-f7e0ef2294d3",
+      "name": "Map Semantic Blocks to Word Styles",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1472, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://python-docx-builder-production.up.railway.app",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $vars.DOCX_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ ({ \"template\": \"GBM Securities Template11.docx\", \"payload\": $json }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "cbca182f-8350-4b68-9c62-4922f40a3ea5",
+      "name": "Python DOCX Builder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [1696, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "binary",
+        "responseDataSource": "set",
+        "inputDataFieldName": "data",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "attachment; filename=\"formatted_document.docx\""
+              }
+            ]
+          }
+        }
+      },
+      "id": "df1fba0a-3b9d-4962-9b74-6b6ab35640fb",
+      "name": "Return DOCX File",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [1920, 0]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are \"GBM Document Clarifier,\" a meticulous pre-processor for financial documents.\nGoals: (1) robustly read messy text, (2) extract key structural and compliance signals, (3) produce a short synopsis, and (4) output strict JSON only.\nRules:\n\nNever invent facts.\n\nDetect headings even if not styled (ALL-CAPS lines, numbered lists, \"Executive Summary\", etc.).\n\nFind compliance markers (e.g., \"For internal use,\" \"Not for distribution,\" \"Disclosures,\" \"MiFID\").\n\nEstimate time bucket (Daily/Weekly/Monthly/Quarterly/Ad-hoc) from phrases.\n\nCount bullets, paragraphs, tokens (approximate OK).\nOutput only valid JSON with the schema below. No markdown code fences. No prose."
+            },
+            {
+              "content": "=<<INPUT_TEXT>>\n{{ $json.raw_text }}\n\nReturn:\n\n{\n  \"title\": \"<string or null>\",\n  \"first_heading_candidates\": [\"<string>\", \"...\"],\n  \"section_headings\": [\"<string>\", \"...\"],\n  \"length_tokens_est\": <int>,\n  \"paragraphs_est\": <int>,\n  \"bullet_count_est\": <int>,\n  \"entities\": {\n    \"tickers\": [\"AAPL\", ...],\n    \"companies\": [\"Apple\", ...],\n    \"geographies\": [\"US\",\"Europe\", ...]\n  },\n  \"compliance_markers\": [\"For internal use\", \"Disclosures\", ...],\n  \"time_bucket\": \"Daily|Weekly|Monthly|Quarterly|Ad-hoc|Unknown\",\n  \"has_tables_or_figures\": true/false,\n  \"synopsis\": \"2\u20134 sentence neutral summary of the content.\"\n}\n"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "id": "123dac5a-224d-4e6b-a82a-0640b9e62f2a",
+      "name": "Document Clarifier",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2,
+      "position": [448, 0],
+      "credentials": {
+        "openAiApi": {
+          "id": "TFKcdbI8T7unt4DU",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "responses": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You classify documents into exactly ONE template category based on the metadata provided.\n\nRules:\n- Do NOT summarize.\n- Do NOT explain.\n- No prose of any kind.\n- No markdown code fences.\n- Only return valid JSON with the structure:\n{\n  \"document_type\": \"<one of the allowed values>\"\n}\n\nAllowed values:\n- \"Quarterly Internal Market Update\"\n- \"Monthly Market Update\"\n- \"Weekly Market Note\"\n- \"Macro Commentary\"\n- \"Portfolio Strategy Update\"\n- \"Credit Market Update\"\n- \"Internal Notes / Raw Analyst Notes\"\n- \"Email-to-Document Draft\"\n- \"Client-Facing Summary\"\n- \"Unknown\""
+            },
+            {
+              "content": "=Given the following extracted metadata and synopsis:\n\n{{ $json[\"output\"][0][\"content\"][0][\"text\"] }}\n\nReturn ONLY:\n{\n  \"document_type\": \"<value>\"\n}\n\nNo prose. No explanation.\n"
+            }
+          ]
+        },
+        "simplify": false,
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2,
+      "position": [752, 0],
+      "id": "8b5031b0-1487-4c79-8aa4-3feb81958f4d",
+      "name": "Document Type Classifier",
+      "credentials": {
+        "openAiApi": {
+          "id": "TFKcdbI8T7unt4DU",
+          "name": "OpenAi account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook Trigger": {
+      "main": [[{"node": "Clean Raw Text", "type": "main", "index": 0}]]
+    },
+    "Clean Raw Text": {
+      "main": [[{"node": "Document Clarifier", "type": "main", "index": 0}]]
+    },
+    "Structure Document": {
+      "main": [[{"node": "Map Semantic Blocks to Word Styles", "type": "main", "index": 0}]]
+    },
+    "Map Semantic Blocks to Word Styles": {
+      "main": [[{"node": "Python DOCX Builder", "type": "main", "index": 0}]]
+    },
+    "Python DOCX Builder": {
+      "main": [[{"node": "Return DOCX File", "type": "main", "index": 0}]]
+    },
+    "Document Clarifier": {
+      "main": [[{"node": "Document Type Classifier", "type": "main", "index": 0}]]
+    },
+    "Document Type Classifier": {
+      "main": [[{"node": "Structure Document", "type": "main", "index": 0}]]
+    }
+  },
+  "active": false,
+  "settings": {"executionOrder": "v1"},
+  "versionId": "28425992-3d59-4cc8-ba3e-96dd5c65550a",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "9a1899ee0a2aff14775629cb91aff48dbbdc8ba2aa7283620ac8c7c2208f8f47"
+  },
+  "id": "xY3LLl0zt7IiW0Jl",
+  "tags": []
+}
