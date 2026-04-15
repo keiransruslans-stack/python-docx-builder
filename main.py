@@ -14,9 +14,8 @@ TEMPLATE_DIR = "templates"
 # ✅ Разрешаем только те стили, которые есть в твоём .docx шаблоне
 ALLOWED_STYLES = {
     "GBM Normal1",
-    "GBM Dash Bullet",
+    "GBM dash bullets",
     "GBM Note",
-    "GBM Raw",
     "Heading 1",
     "Heading 2",
     "Heading 3",
